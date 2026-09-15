@@ -1,0 +1,8 @@
+{application, lb, [
+    {description, "TCP load balancer with health checks and pluggable balancing strategies"},
+    {vsn, "0.1.0"},
+    {registered, [lb_sup]},
+    {mod, {lb_app, []}},
+    {applications, [kernel, stdlib]},
+    {env, []}
+]}.

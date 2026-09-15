@@ -1,0 +1,7 @@
+-sname lb
+
+# idle schedulers busy-wait by default; trade a bit of wakeup latency
+# for not burning cpu quota when running in containers
++sbwt none
++sbwtdcpu none
++sbwtdio none
