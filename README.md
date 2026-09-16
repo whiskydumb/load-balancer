@@ -2,6 +2,16 @@
 
 Layer 4 TCP load balancer built on Erlang/OTP with no runtime dependencies.
 
+## Balancing strategies
+
+Every strategy honours backend weights.
+
+| Strategy      | Algorithm                                              | Fits when                                 |
+| ------------- | ------------------------------------------------------ | ----------------------------------------- |
+| `round_robin` | smooth weighted round robin, as in nginx               | backends are alike, connections are short |
+| `least_conn`  | power of two choices over active connections by weight | connection lifetimes vary widely          |
+| `source_hash` | weighted rendezvous hashing of the client address      | a client must stick to one backend        |
+
 ## Requirements
 
 - Erlang/OTP 27 or newer
