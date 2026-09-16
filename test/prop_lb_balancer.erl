@@ -115,7 +115,7 @@ weight() ->
     range(1, 100).
 
 backends_with_exclusions() ->
-    ?LET(Backends, backends(), {Backends, subset(ids(Backends))}).
+    ?LET(Backends, backends(), {Backends, lb_gen:subset(ids(Backends))}).
 
 %% id 0 is outside the generated range, so the pool always keeps a survivor
 backends_with_removal() ->
@@ -130,13 +130,6 @@ loads(Backends) ->
         Values,
         vector(length(Backends), range(0, 1000)),
         maps:from_list(lists:zip(ids(Backends), Values))
-    ).
-
-subset(Items) ->
-    ?LET(
-        Mask,
-        vector(length(Items), boolean()),
-        [Item || {Item, true} <- lists:zip(Items, Mask)]
     ).
 
 address() ->

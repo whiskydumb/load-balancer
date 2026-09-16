@@ -4,5 +4,5 @@
     {registered, [lb_sup]},
     {mod, {lb_app, []}},
     {applications, [kernel, stdlib]},
-    {env, []}
+    {env, [{listeners, []}, {pools, []}]}
 ]}.

@@ -36,9 +36,10 @@
     source_hash => lb_balancer_source_hash
 }).
 
+%% sorted, so error messages and docs list strategies in a stable order
 -spec strategies() -> [strategy()].
 strategies() ->
-    maps:keys(?MODULES).
+    lists:sort(maps:keys(?MODULES)).
 
 %% a selector is an immutable snapshot of pool membership, rebuilt on every change
 -spec new(strategy(), [backend()]) -> selector().
