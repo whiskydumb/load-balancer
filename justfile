@@ -22,9 +22,9 @@ lint:
     rebar3 xref
     rebar3 dialyzer
 
-# unit and property tests
+# unit, property and integration tests
 test:
-    rebar3 eunit
+    rebar3 do eunit, ct
 
 # the same gates ci runs, cheapest first
 check: fmt-check lint test
