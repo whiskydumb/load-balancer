@@ -2,27 +2,27 @@
 -behaviour(gen_server).
 
 -export([start_link/1, tables/0]).
--export([pick/3, track/2, set_health/3, backends/1, pid/1]).
+-export([pick/3, track/2, observe/3, backends/1, pid/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
--export_type([name/0, health/0, backend_status/0]).
+-export_type([name/0, observation/0, backend_status/0]).
 
 -include_lib("kernel/include/logger.hrl").
 
-%% membership lives in this process, but new connections never call it: picks
-%% read the published selector from ets and accounting goes through shared
-%% counters, so a busy or restarting pool does not stall traffic
+%% membership and health live in this process, but new connections never call
+%% it: picks read the published selector from ets and accounting goes through
+%% shared counters, so a busy or restarting pool does not stall traffic
 
 -define(SELECTORS, lb_pool_selectors).
 -define(COUNTERS, lb_pool_counters).
 -define(CONNECTIONS, lb_pool_connections).
 
 -type name() :: atom().
--type health() :: up | down.
+-type observation() :: success | {failure, Reason :: term()}.
 -type backend_status() :: #{
     backend := lb_backend:id(),
     weight := lb_balancer:weight(),
-    health := health(),
+    health := lb_health:status(),
     active := non_neg_integer()
 }.
 
@@ -30,7 +30,10 @@
     name :: name(),
     strategy :: lb_balancer:strategy(),
     backends :: [{lb_backend:id(), lb_balancer:weight()}],
-    health :: #{lb_backend:id() => health()}
+    %% without active probes nothing could bring a backend back up, so failures
+    %% reported by connections are ignored too
+    checks :: boolean(),
+    trackers :: #{lb_backend:id() => lb_health:tracker()}
 }).
 
 -spec start_link(lb_config:pool()) -> gen_server:start_ret().
@@ -78,14 +81,20 @@ track(Pool, Backend) ->
         Pid -> gen_server:cast(Pid, {monitor, Conn})
     end.
 
--spec set_health(name(), lb_backend:id(), health()) ->
-    ok | {error, unknown_pool | unknown_backend}.
-set_health(Pool, Backend, Health) ->
-    call(Pool, {set_health, Backend, Health}).
+%% feeds a probe result or a failed client connection into the backend health
+-spec observe(name(), lb_backend:id(), observation()) -> ok.
+observe(Pool, Backend, Observation) ->
+    case pid(Pool) of
+        undefined -> ok;
+        Pid -> gen_server:cast(Pid, {observe, Backend, Observation})
+    end.
 
 -spec backends(name()) -> {ok, [backend_status()]} | {error, unknown_pool}.
 backends(Pool) ->
-    call(Pool, backends).
+    case pid(Pool) of
+        undefined -> {error, unknown_pool};
+        Pid -> gen_server:call(Pid, backends)
+    end.
 
 %% the pid stays published while the pool restarts, so it may point to a
 %% process that is already gone
@@ -94,13 +103,19 @@ pid(Pool) ->
     ets:lookup_element(?SELECTORS, Pool, 2, undefined).
 
 -spec init(lb_config:pool()) -> {ok, #state{}}.
-init(#{name := Name, strategy := Strategy, backends := Backends}) ->
+init(#{
+    name := Name,
+    strategy := Strategy,
+    backends := Backends,
+    health_check := #{enabled := Checks} = HealthCheck
+}) ->
     Members = [{lb_backend:id(Backend), Weight} || #{weight := Weight} = Backend <- Backends],
     State = #state{
         name = Name,
         strategy = Strategy,
         backends = Members,
-        health = maps:from_list([{Id, up} || {Id, _} <- Members])
+        checks = Checks,
+        trackers = maps:from_list([{Id, lb_health:new(HealthCheck)} || {Id, _} <- Members])
     },
     publish(State),
     %% connections outlive a pool restart. publishing before scanning means one
@@ -118,23 +133,6 @@ init(#{name := Name, strategy := Strategy, backends := Backends}) ->
     {ok, State}.
 
 -spec handle_call(term(), gen_server:from(), #state{}) -> {reply, term(), #state{}}.
-handle_call({set_health, Backend, Health}, _From, #state{name = Name, health = Current} = State) ->
-    case Current of
-        #{Backend := Health} ->
-            {reply, ok, State};
-        #{Backend := _Previous} ->
-            Next = State#state{health = Current#{Backend := Health}},
-            publish(Next),
-            ?LOG_NOTICE(#{
-                event => backend_health_changed,
-                pool => Name,
-                backend => lb_backend:format(Backend),
-                health => Health
-            }),
-            {reply, ok, Next};
-        #{} ->
-            {reply, {error, unknown_backend}, State}
-    end;
 handle_call(backends, _From, State) ->
     {reply, {ok, statuses(State)}, State};
 handle_call(Request, From, State) ->
@@ -145,6 +143,13 @@ handle_call(Request, From, State) ->
 handle_cast({monitor, Conn}, State) ->
     _ = monitor(process, Conn),
     {noreply, State};
+handle_cast({observe, _Backend, _Observation}, #state{checks = false} = State) ->
+    {noreply, State};
+handle_cast({observe, Backend, Observation}, #state{trackers = Trackers} = State) ->
+    case Trackers of
+        #{Backend := Tracker} -> {noreply, observed(Backend, Observation, Tracker, State)};
+        #{} -> {noreply, State}
+    end;
 handle_cast(Message, State) ->
     ?LOG_WARNING(#{event => unexpected_cast, message => Message}),
     {noreply, State}.
@@ -157,11 +162,31 @@ handle_info(Message, State) ->
     ?LOG_WARNING(#{event => unexpected_message, message => Message}),
     {noreply, State}.
 
-call(Pool, Request) ->
-    case pid(Pool) of
-        undefined -> {error, unknown_pool};
-        Pid -> gen_server:call(Pid, Request)
+observed(Backend, Observation, Tracker, #state{name = Name, trackers = Trackers} = State) ->
+    Next = lb_health:observe(outcome(Observation), Tracker),
+    Observed = State#state{trackers = Trackers#{Backend := Next}},
+    case lb_health:status(Next) =:= lb_health:status(Tracker) of
+        true ->
+            Observed;
+        false ->
+            publish(Observed),
+            log_transition(Name, Backend, Observation),
+            Observed
     end.
+
+outcome(success) -> success;
+outcome({failure, _Reason}) -> failure.
+
+%% a backend only goes down on a failure and only comes up on a success
+log_transition(Pool, Backend, {failure, Reason}) ->
+    ?LOG_WARNING(#{
+        event => backend_down,
+        pool => Pool,
+        backend => lb_backend:format(Backend),
+        reason => Reason
+    });
+log_transition(Pool, Backend, success) ->
+    ?LOG_NOTICE(#{event => backend_up, pool => Pool, backend => lb_backend:format(Backend)}).
 
 %% take/2 is atomic, so a connection monitored twice is still released once
 release(Conn) ->
@@ -173,20 +198,23 @@ release(Conn) ->
             ok
     end.
 
-publish(#state{name = Name, strategy = Strategy, backends = Backends, health = Health}) ->
-    Up = [Member || {Id, _Weight} = Member <- Backends, map_get(Id, Health) =:= up],
+publish(#state{name = Name, strategy = Strategy, backends = Backends} = State) ->
+    Up = [Member || {Id, _Weight} = Member <- Backends, health(Id, State) =:= up],
     true = ets:insert(?SELECTORS, {Name, self(), lb_balancer:new(Strategy, Up)}),
     ok.
+
+health(Backend, #state{trackers = Trackers}) ->
+    lb_health:status(map_get(Backend, Trackers)).
 
 active(Pool, Backend) ->
     ets:lookup_element(?COUNTERS, {active, Pool, Backend}, 2, 0).
 
-statuses(#state{name = Name, backends = Backends, health = Health}) ->
+statuses(#state{name = Name, backends = Backends} = State) ->
     [
         #{
             backend => Id,
             weight => Weight,
-            health => map_get(Id, Health),
+            health => health(Id, State),
             active => active(Name, Id)
         }
      || {Id, Weight} <- Backends

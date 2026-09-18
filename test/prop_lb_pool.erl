@@ -3,14 +3,14 @@
 -include_lib("proper/include/proper.hrl").
 
 -export([initial_state/0, command/1, precondition/2, postcondition/3, next_state/3]).
--export([open/1, close/1, crash/1, restart_pool/0, set_health/2]).
+-export([open/1, close/1, crash/1, restart_pool/0, observe/2]).
 
 -define(POOL, prop_pool).
 -define(BACKENDS, [{{127, 0, 0, 1}, 9001}, {{127, 0, 0, 1}, 9002}, {{127, 0, 0, 1}, 9003}]).
 
 %% random sequences of connections opening, closing and crashing, interleaved
-%% with pool restarts and health changes: after every step the counters match
-%% the live connections and picks respect health
+%% with pool restarts and health observations: after every step the counters
+%% match the live connections and picks respect health
 prop_counters_follow_live_connections() ->
     ?FORALL(
         Commands,
@@ -36,7 +36,7 @@ command(State) ->
         [
             {4, {call, ?MODULE, open, [elements(?BACKENDS)]}},
             {1, {call, ?MODULE, restart_pool, []}},
-            {2, {call, ?MODULE, set_health, [elements(?BACKENDS), elements([up, down])]}}
+            {2, {call, ?MODULE, observe, [elements(?BACKENDS), observation()]}}
         ] ++
             [{3, {call, ?MODULE, close, [elements(Conns)]}} || Conns =/= []] ++
             [{2, {call, ?MODULE, crash, [elements(Conns)]}} || Conns =/= []]
@@ -56,8 +56,9 @@ next_state(#{conns := Conns} = State, _Result, {call, ?MODULE, Stop, [Conn]}) wh
 next_state(State, _Result, {call, ?MODULE, restart_pool, []}) ->
     %% health is not persisted, a fresh pool starts with every backend up
     State#{health := all_up()};
-next_state(#{health := Health} = State, _Result, {call, ?MODULE, set_health, [Backend, Value]}) ->
-    State#{health := Health#{Backend := Value}}.
+%% the fixture flips health on a single observation
+next_state(#{health := Health} = State, _Result, {call, ?MODULE, observe, [Backend, Observation]}) ->
+    State#{health := Health#{Backend := status_after(Observation)}}.
 
 postcondition(State, Call, Result) ->
     #{conns := Conns, health := Health} = next_state(State, Result, Call),
@@ -82,8 +83,14 @@ restart_pool() ->
         config => lb_pool_fixture:config(?POOL, round_robin, ?BACKENDS)
     }).
 
-set_health(Backend, Health) ->
-    lb_pool:set_health(?POOL, Backend, Health).
+observe(Backend, Observation) ->
+    lb_pool_fixture:observe(?POOL, Backend, Observation).
+
+observation() ->
+    elements([success, {failure, econnrefused}]).
+
+status_after(success) -> up;
+status_after({failure, _Reason}) -> down.
 
 counters() ->
     {ok, Statuses} = lb_pool:backends(?POOL),

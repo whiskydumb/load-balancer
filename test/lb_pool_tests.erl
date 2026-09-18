@@ -13,13 +13,23 @@ round_robin_pool_test_() ->
             fun cursor_is_shared_between_callers/1,
             fun down_backend_is_skipped_until_it_is_up/1,
             fun pool_without_healthy_backends_has_no_backend/1,
-            fun unknown_names_are_rejected/1,
+            fun unknown_names_are_handled/1,
             fun connection_counts_until_it_closes/1,
             fun crashed_connection_releases_its_slot/1,
             fun restarted_pool_keeps_counting_open_connections/1,
             fun connection_closed_while_pool_was_down_is_released/1,
             fun connection_monitored_twice_is_released_once/1
         ]}.
+
+streak_pool_test_() ->
+    Config = lb_pool_fixture:config(?POOL, round_robin, [?A], #{rise => 2, fall => 2}),
+    {setup, fun() -> lb_pool_fixture:start(Config) end, fun lb_pool_fixture:stop/1,
+        fun health_flips_only_after_full_streaks/1}.
+
+unchecked_pool_test_() ->
+    Config = lb_pool_fixture:config(?POOL, round_robin, [?A], #{enabled => false}),
+    {setup, fun() -> lb_pool_fixture:start(Config) end, fun lb_pool_fixture:stop/1,
+        fun failures_are_ignored_without_active_checks/1}.
 
 least_conn_pool_test_() ->
     {setup, fun() -> lb_pool_fixture:start(?POOL, least_conn, [?A, ?B]) end,
@@ -37,25 +47,27 @@ cursor_is_shared_between_callers(_) ->
 
 down_backend_is_skipped_until_it_is_up(_) ->
     ?_test(begin
-        ok = lb_pool:set_health(?POOL, ?B, down),
+        ok = lb_pool_fixture:observe(?POOL, ?B, {failure, econnrefused}),
         ?assertNot(lists:member(?B, picks(6))),
-        ok = lb_pool:set_health(?POOL, ?B, up),
+        ok = lb_pool_fixture:observe(?POOL, ?B, success),
         ?assert(lists:member(?B, picks(3)))
     end).
 
 pool_without_healthy_backends_has_no_backend(_) ->
     ?_test(begin
-        [ok = lb_pool:set_health(?POOL, Backend, down) || Backend <- [?A, ?B, ?C]],
+        [ok = lb_pool_fixture:observe(?POOL, B, {failure, timeout}) || B <- [?A, ?B, ?C]],
         ?assertEqual({error, no_backend}, lb_pool:pick(?POOL, key, []))
     end).
 
-unknown_names_are_rejected(_) ->
+unknown_names_are_handled(_) ->
     [
         ?_assertEqual({error, no_backend}, lb_pool:pick(ghost, key, [])),
         ?_assertEqual({error, unknown_pool}, lb_pool:backends(ghost)),
-        ?_assertEqual(
-            {error, unknown_backend}, lb_pool:set_health(?POOL, {{10, 0, 0, 1}, 1}, down)
-        )
+        ?_assertEqual(ok, lb_pool:observe(ghost, ?A, success)),
+        ?_test(begin
+            ok = lb_pool_fixture:observe(?POOL, {{10, 0, 0, 1}, 1}, {failure, timeout}),
+            ?assertMatch({ok, [_, _, _]}, lb_pool:backends(?POOL))
+        end)
     ].
 
 connection_counts_until_it_closes(_) ->
@@ -104,6 +116,25 @@ connection_monitored_twice_is_released_once(_) ->
         lb_pool_fixture:close(Other)
     end).
 
+health_flips_only_after_full_streaks(_) ->
+    ?_test(begin
+        Steps = [{failure, timeout}, {failure, timeout}, success, success],
+        Seen = [
+            begin
+                ok = lb_pool_fixture:observe(?POOL, ?A, Observation),
+                lb_pool_fixture:health(?POOL, ?A)
+            end
+         || Observation <- Steps
+        ],
+        ?assertEqual([up, down, down, up], Seen)
+    end).
+
+failures_are_ignored_without_active_checks(_) ->
+    ?_test(begin
+        ok = lb_pool_fixture:observe(?POOL, ?A, {failure, econnrefused}),
+        ?assertEqual(up, lb_pool_fixture:health(?POOL, ?A))
+    end).
+
 busy_backend_is_avoided(_) ->
     ?_test(begin
         Conns = [lb_pool_fixture:open(?POOL, ?A) || _ <- lists:seq(1, 3)],
@@ -150,7 +181,11 @@ start_application() ->
         {error, {already_loaded, lb}} -> ok
     end,
     ok = application:set_env(lb, pools, [
-        #{name => app_pool, backends => [#{host => "127.0.0.1", port => 9001}]}
+        #{
+            name => app_pool,
+            backends => [#{host => "127.0.0.1", port => 9001}],
+            health_check => #{enabled => false}
+        }
     ]),
     {ok, Started} = application:ensure_all_started(lb),
     Started.

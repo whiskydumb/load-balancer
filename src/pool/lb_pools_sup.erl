@@ -13,7 +13,7 @@ init(Pools) ->
     %% pools are independent: a crashing pool restarts alone
     SupFlags = #{strategy => one_for_one, intensity => 10, period => 10},
     Children = [
-        #{id => {lb_pool, Name}, start => {lb_pool, start_link, [Pool]}}
+        #{id => {lb_pool_sup, Name}, start => {lb_pool_sup, start_link, [Pool]}, type => supervisor}
      || #{name := Name} = Pool <- Pools
     ],
     {ok, {SupFlags, Children}}.
