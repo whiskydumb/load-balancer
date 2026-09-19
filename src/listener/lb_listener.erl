@@ -1,8 +1,11 @@
 -module(lb_listener).
 -behaviour(gen_server).
 
--export([start_link/2, tables/0, port/1, lookup/1, start_proxy/1, connections/1]).
+-export([start_link/2, tables/0]).
+-export([port/1, lookup/1, start_proxy/1, connections/1, names/0, stats/1, record/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
+
+-export_type([counters/0, metric/0]).
 
 -include_lib("kernel/include/logger.hrl").
 
@@ -12,11 +15,17 @@
 %% backlog instead of being accepted and starved
 
 -define(TABLE, lb_listeners).
+-define(METRICS, [accepted, upstream, downstream, no_backend]).
+
+%% proxies bump these without talking to the listener
+-opaque counters() :: counters:counters_ref().
+-type metric() :: accepted | upstream | downstream | no_backend.
 
 -record(state, {
     name :: atom(),
     socket :: gen_tcp:socket(),
     max :: pos_integer(),
+    counters :: counters(),
     proxy :: lb_proxy:options(),
     proxies = #{} :: #{pid() => []},
     waiting = queue:new() :: queue:queue(gen_server:from())
@@ -26,6 +35,7 @@
 start_link(Listener, Pool) ->
     gen_server:start_link(?MODULE, {Listener, Pool}, []).
 
+%% one row per listener: {Name, Pid, Socket, Port, Counters}
 -spec tables() -> [lb_table_owner:table()].
 tables() ->
     [{?TABLE, [set, public, {read_concurrency, true}]}].
@@ -37,7 +47,7 @@ port(Name) ->
 
 -spec lookup(atom()) -> {pid(), gen_tcp:socket()}.
 lookup(Name) ->
-    [{Name, Listener, Socket, _Port}] = ets:lookup(?TABLE, Name),
+    [{Name, Listener, Socket, _Port, _Counters}] = ets:lookup(?TABLE, Name),
     {Listener, Socket}.
 
 %% blocks while the listener is at max_connections
@@ -49,6 +59,27 @@ start_proxy(Listener) ->
 connections(Name) ->
     {Listener, _Socket} = lookup(Name),
     gen_server:call(Listener, connections).
+
+-spec names() -> [atom()].
+names() ->
+    ets:select(?TABLE, [{{'$1', '_', '_', '_', '_'}, [], ['$1']}]).
+
+-spec stats(atom()) -> {ok, #{atom() => non_neg_integer()}} | {error, unknown_listener}.
+stats(Name) ->
+    case ets:lookup(?TABLE, Name) of
+        [{Name, Listener, _Socket, Port, Counters}] ->
+            Totals = maps:from_list([
+                {Metric, counters:get(Counters, index(Metric))}
+             || Metric <- ?METRICS
+            ]),
+            {ok, Totals#{port => Port, active => gen_server:call(Listener, connections)}};
+        [] ->
+            {error, unknown_listener}
+    end.
+
+-spec record(counters(), metric(), pos_integer()) -> ok.
+record(Counters, Metric, Amount) ->
+    counters:add(Counters, index(Metric), Amount).
 
 -spec init({lb_config:listener(), lb_config:pool()}) ->
     {ok, #state{}} | {stop, {listen_failed, term()}}.
@@ -69,7 +100,8 @@ init({Listener, #{connect_timeout := ConnectTimeout}}) ->
     case gen_tcp:listen(Port, Options) of
         {ok, Socket} ->
             {ok, Bound} = inet:port(Socket),
-            true = ets:insert(?TABLE, {Name, self(), Socket, Bound}),
+            Counters = counters(Name),
+            true = ets:insert(?TABLE, {Name, self(), Socket, Bound, Counters}),
             ?LOG_INFO(#{
                 event => listener_started,
                 listener => Name,
@@ -81,9 +113,11 @@ init({Listener, #{connect_timeout := ConnectTimeout}}) ->
                 name = Name,
                 socket = Socket,
                 max = Max,
+                counters = Counters,
                 proxy = #{
                     listener => Name,
                     pool => Pool,
+                    counters => Counters,
                     connect_timeout => ConnectTimeout,
                     connect_attempts => Attempts,
                     idle_timeout => IdleTimeout
@@ -126,6 +160,19 @@ handle_info(Message, State) ->
     ?LOG_WARNING(#{event => unexpected_message, message => Message}),
     {noreply, State}.
 
+%% a restarted listener keeps counting where its predecessor stopped, so the
+%% totals only reset with the node
+counters(Name) ->
+    case ets:lookup(?TABLE, Name) of
+        [{Name, _Pid, _Socket, _Port, Counters}] -> Counters;
+        [] -> counters:new(length(?METRICS), [write_concurrency])
+    end.
+
+index(accepted) -> 1;
+index(upstream) -> 2;
+index(downstream) -> 3;
+index(no_backend) -> 4.
+
 %% a freed slot goes to the acceptor that has waited longest; one whose client
 %% vanished meanwhile leaves a proxy that times out waiting for the socket
 admit(#state{waiting = Waiting} = State) ->
@@ -138,6 +185,7 @@ admit(#state{waiting = Waiting} = State) ->
             State
     end.
 
-spawn_proxy(#state{proxy = Options, proxies = Proxies} = State) ->
+spawn_proxy(#state{proxy = Options, proxies = Proxies, counters = Counters} = State) ->
     {ok, Proxy} = lb_proxy:start_link(Options),
+    ok = record(Counters, accepted, 1),
     {Proxy, State#state{proxies = Proxies#{Proxy => []}}}.

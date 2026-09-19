@@ -3,7 +3,14 @@
 -include_lib("eunit/include/eunit.hrl").
 
 empty_config_is_valid_test() ->
-    ?assertEqual({ok, #{listeners => [], pools => []}}, lb_config:validate(#{})).
+    ?assertEqual(
+        {ok, #{
+            listeners => [],
+            pools => [],
+            admin => #{enabled => false, ip => {127, 0, 0, 1}, port => 9900}
+        }},
+        lb_config:validate(#{})
+    ).
 
 defaults_fill_every_option_test() ->
     {ok, #{listeners := [Listener], pools := [Pool]}} = lb_config:validate(#{

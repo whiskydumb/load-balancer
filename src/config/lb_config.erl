@@ -2,7 +2,7 @@
 
 -export([load/0, validate/1, format_error/1]).
 
--export_type([config/0, listener/0, pool/0, backend/0, health_check/0, host/0, error/0]).
+-export_type([config/0, listener/0, pool/0, backend/0, health_check/0, admin/0, host/0, error/0]).
 
 %% the whole configuration is validated before the supervision tree starts, so
 %% a typo stops the node at boot instead of surfacing under traffic
@@ -43,7 +43,13 @@
     connect_attempts := pos_integer()
 }.
 
--type config() :: #{listeners := [listener()], pools := [pool()]}.
+-type admin() :: #{
+    enabled := boolean(),
+    ip := inet:ip_address(),
+    port := inet:port_number()
+}.
+
+-type config() :: #{listeners := [listener()], pools := [pool()], admin := admin()}.
 
 -type reason() :: {duplicate, term()} | {unknown_pool, atom()} | {exceeds, interval, pos_integer()}.
 -type error() :: lb_config_schema:error() | {lb_config_schema:path(), reason()}.
@@ -79,7 +85,8 @@ format_error(Error) ->
 schema() ->
     #{
         listeners => #{type => {list, {map, listener_schema()}}, default => []},
-        pools => #{type => {list, {map, pool_schema()}}, default => []}
+        pools => #{type => {list, {map, pool_schema()}}, default => []},
+        admin => #{type => {map, admin_schema()}, default => #{}}
     }.
 
 listener_schema() ->
@@ -111,6 +118,15 @@ backend_schema() ->
         host => #{type => host},
         port => #{type => {integer, 1, 65535}},
         weight => #{type => {integer, 1, 100}, default => 1}
+    }.
+
+%% off unless asked for; its bearer token comes from the LB_ADMIN_TOKEN
+%% environment variable and never from a config file
+admin_schema() ->
+    #{
+        enabled => #{type => boolean, default => false},
+        ip => #{type => ip_address, default => {127, 0, 0, 1}},
+        port => #{type => {integer, 0, 65535}, default => 9900}
     }.
 
 health_check_schema() ->

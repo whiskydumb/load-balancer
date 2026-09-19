@@ -2,7 +2,7 @@
 -behaviour(gen_server).
 
 -export([start_link/1, tables/0]).
--export([pick/3, track/2, observe/3, backends/1, pid/1]).
+-export([pick/3, track/2, connect_failed/3, observe/3, backends/1, names/0, pid/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
 -export_type([name/0, observation/0, backend_status/0]).
@@ -23,7 +23,9 @@
     backend := lb_backend:id(),
     weight := lb_balancer:weight(),
     health := lb_health:status(),
-    active := non_neg_integer()
+    active := non_neg_integer(),
+    connections_total := non_neg_integer(),
+    connect_failures_total := non_neg_integer()
 }.
 
 -record(state, {
@@ -41,7 +43,8 @@ start_link(Config) ->
     gen_server:start_link(?MODULE, Config, []).
 
 %% selectors are read by every new connection and rewritten only when membership
-%% changes; counters and connection rows are written concurrently by proxies
+%% changes; counters and connection rows are written concurrently by proxies.
+%% every backend has one counter row: {Key, Active, Connected, Failed}
 -spec tables() -> [lb_table_owner:table()].
 tables() ->
     [
@@ -74,12 +77,22 @@ track(Pool, Backend) ->
     Conn = self(),
     %% the counter goes up before the row exists and a release needs the row, so
     %% the counter never drops below the number of tracked connections
-    _ = ets:update_counter(?COUNTERS, {active, Pool, Backend}, 1, {{active, Pool, Backend}, 0}),
+    _ = ets:update_counter(
+        ?COUNTERS, counter_key(Pool, Backend), [{2, 1}, {3, 1}], counter_row(Pool, Backend)
+    ),
     true = ets:insert_new(?CONNECTIONS, {Conn, Pool, Backend}),
     case pid(Pool) of
         undefined -> ok;
         Pid -> gen_server:cast(Pid, {monitor, Conn})
     end.
+
+%% counts a failed connect against the backend and feeds it into its health
+-spec connect_failed(name(), lb_backend:id(), term()) -> ok.
+connect_failed(Pool, Backend, Reason) ->
+    _ = ets:update_counter(
+        ?COUNTERS, counter_key(Pool, Backend), {4, 1}, counter_row(Pool, Backend)
+    ),
+    observe(Pool, Backend, {failure, Reason}).
 
 %% feeds a probe result or a failed client connection into the backend health
 -spec observe(name(), lb_backend:id(), observation()) -> ok.
@@ -95,6 +108,10 @@ backends(Pool) ->
         undefined -> {error, unknown_pool};
         Pid -> gen_server:call(Pid, backends)
     end.
+
+-spec names() -> [name()].
+names() ->
+    ets:select(?SELECTORS, [{{'$1', '_', '_'}, [], ['$1']}]).
 
 %% the pid stays published while the pool restarts, so it may point to a
 %% process that is already gone
@@ -192,7 +209,7 @@ log_transition(Pool, Backend, success) ->
 release(Conn) ->
     case ets:take(?CONNECTIONS, Conn) of
         [{Conn, Pool, Backend}] ->
-            _ = ets:update_counter(?COUNTERS, {active, Pool, Backend}, -1),
+            _ = ets:update_counter(?COUNTERS, counter_key(Pool, Backend), {2, -1}),
             ok;
         [] ->
             ok
@@ -207,15 +224,30 @@ health(Backend, #state{trackers = Trackers}) ->
     lb_health:status(map_get(Backend, Trackers)).
 
 active(Pool, Backend) ->
-    ets:lookup_element(?COUNTERS, {active, Pool, Backend}, 2, 0).
+    ets:lookup_element(?COUNTERS, counter_key(Pool, Backend), 2, 0).
+
+counter_key(Pool, Backend) ->
+    {backend, Pool, Backend}.
+
+counter_row(Pool, Backend) ->
+    {counter_key(Pool, Backend), 0, 0, 0}.
 
 statuses(#state{name = Name, backends = Backends} = State) ->
     [
-        #{
-            backend => Id,
-            weight => Weight,
-            health => health(Id, State),
-            active => active(Name, Id)
-        }
+        begin
+            {_, Active, Connected, Failed} =
+                case ets:lookup(?COUNTERS, counter_key(Name, Id)) of
+                    [Row] -> Row;
+                    [] -> counter_row(Name, Id)
+                end,
+            #{
+                backend => Id,
+                weight => Weight,
+                health => health(Id, State),
+                active => Active,
+                connections_total => Connected,
+                connect_failures_total => Failed
+            }
+        end
      || {Id, Weight} <- Backends
     ].

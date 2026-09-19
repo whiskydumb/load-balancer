@@ -20,6 +20,7 @@
 -type options() :: #{
     listener := atom(),
     pool := lb_pool:name(),
+    counters := lb_listener:counters(),
     connect_timeout := pos_integer(),
     connect_attempts := pos_integer(),
     idle_timeout := pos_integer()
@@ -44,6 +45,7 @@
     to :: gen_tcp:socket(),
     proxy :: pid(),
     activity :: atomics:atomics_ref(),
+    counters :: lb_listener:counters(),
     idle_timeout :: pos_integer()
 }).
 
@@ -111,7 +113,7 @@ connecting(internal, connect, #data{options = Options, peer = Peer, tried = Trie
                     {next_state, relaying, start_pumps(Next)};
                 {error, Reason} ->
                     %% a refused connection is evidence against the backend
-                    ok = lb_pool:observe(Pool, Backend, {failure, Reason}),
+                    ok = lb_pool:connect_failed(Pool, Backend, Reason),
                     retry(Reason, Data#data{tried = [Backend | Tried]})
             end
     end;
@@ -139,7 +141,9 @@ retry(Reason, #data{options = #{connect_attempts := Attempts}, tried = Tried} = 
     end.
 
 %% the client socket closes when this process exits
-give_up(Reason, #data{options = #{listener := Listener, pool := Pool}, tried = Tried}) ->
+give_up(Reason, #data{options = Options, tried = Tried}) ->
+    #{listener := Listener, pool := Pool, counters := Counters} = Options,
+    ok = lb_listener:record(Counters, no_backend, 1),
     ?LOG_WARNING(#{
         event => no_backend,
         listener => Listener,
@@ -163,7 +167,7 @@ finish(Reason, #data{options = #{listener := Listener}} = Data) ->
     {stop, normal, Data}.
 
 start_pumps(#data{client = Client, backend = Backend, options = Options} = Data) ->
-    #{idle_timeout := Idle} = Options,
+    #{idle_timeout := Idle, counters := Counters} = Options,
     %% both pumps stamp the last transfer here, so neither calls the connection
     %% idle while the other direction is busy
     Activity = atomics:new(1, []),
@@ -176,6 +180,7 @@ start_pumps(#data{client = Client, backend = Backend, options = Options} = Data)
             to = To,
             proxy = Proxy,
             activity = Activity,
+            counters = Counters,
             idle_timeout = Idle
         }
     end,
@@ -194,8 +199,12 @@ pump(#pump{from = From, to = To, activity = Activity} = Pump, Wait, Sent) ->
         {ok, Chunk} ->
             ok = atomics:put(Activity, 1, now_ms()),
             case gen_tcp:send(To, Chunk) of
-                ok -> pump(Pump, Pump#pump.idle_timeout, Sent + byte_size(Chunk));
-                {error, Reason} -> report(Pump, {error, Reason}, Sent)
+                ok ->
+                    Size = byte_size(Chunk),
+                    ok = lb_listener:record(Pump#pump.counters, Pump#pump.direction, Size),
+                    pump(Pump, Pump#pump.idle_timeout, Sent + Size);
+                {error, Reason} ->
+                    report(Pump, {error, Reason}, Sent)
             end;
         {error, timeout} ->
             %% this direction was quiet, but the other one may have been busy
