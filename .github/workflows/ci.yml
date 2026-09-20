@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: otp ${{ matrix.otp }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        otp: ["27", "28", "29"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          rebar3-version: "3.27.0"
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/rebar3
+            _build/default/rebar3_*_plt
+          key: rebar3-otp${{ matrix.otp }}-${{ hashFiles('rebar.config') }}
+          restore-keys: rebar3-otp${{ matrix.otp }}-
+
+      - run: rebar3 fmt --check
+      - run: rebar3 xref
+      - run: rebar3 dialyzer
+      - run: rebar3 eunit
+      - run: rebar3 ct
+
+      - name: common test logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ct-logs-otp${{ matrix.otp }}
+          path: _build/test/logs
+          retention-days: 7
