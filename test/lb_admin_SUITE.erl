@@ -114,31 +114,10 @@ get_json(Path, Token) ->
     {Status, Headers, json:decode(Body)}.
 
 request(Method, Path, Token) ->
-    exchange([Method, " ", Path, " HTTP/1.1\r\nhost: lb\r\n", authorization(Token), "\r\n"]).
+    lb_test_http:request(Method, Path, Token, <<>>).
 
-authorization(none) -> [];
-authorization(Token) -> ["authorization: Bearer ", Token, "\r\n"].
-
-%% one request per connection: the server answers and closes
 exchange(Request) ->
-    {ok, Socket} = gen_tcp:connect(
-        {127, 0, 0, 1}, lb_admin:port(), [binary, {active, false}], 1000
-    ),
-    ok = gen_tcp:send(Socket, Request),
-    parse(read_all(Socket, <<>>)).
-
-read_all(Socket, Acc) ->
-    case gen_tcp:recv(Socket, 0, 2000) of
-        {ok, Data} -> read_all(Socket, <<Acc/binary, Data/binary>>);
-        {error, closed} -> Acc
-    end.
-
-parse(Response) ->
-    [Head, Body] = binary:split(Response, <<"\r\n\r\n">>),
-    [StatusLine | HeaderLines] = binary:split(Head, <<"\r\n">>, [global]),
-    [_Version, Code | _Reason] = binary:split(StatusLine, <<" ">>, [global]),
-    Headers = [list_to_tuple(binary:split(Line, <<": ">>)) || Line <- HeaderLines],
-    {binary_to_integer(Code), Headers, Body}.
+    lb_test_http:exchange(Request).
 
 header(Name, Headers) ->
-    proplists:get_value(Name, Headers).
+    lb_test_http:header(Name, Headers).

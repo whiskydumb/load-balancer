@@ -3,7 +3,7 @@
 
 -export([start_link/2, tables/0]).
 -export([port/1, lookup/1, start_proxy/1, connections/1, names/0, stats/1, record/3]).
--export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -export_type([counters/0, metric/0]).
 
@@ -25,6 +25,7 @@
     name :: atom(),
     socket :: gen_tcp:socket(),
     max :: pos_integer(),
+    drain_timeout :: non_neg_integer(),
     counters :: counters(),
     proxy :: lb_proxy:options(),
     proxies = #{} :: #{pid() => []},
@@ -92,7 +93,8 @@ init({Listener, #{connect_timeout := ConnectTimeout}}) ->
         pool := Pool,
         max_connections := Max,
         idle_timeout := IdleTimeout,
-        connect_attempts := Attempts
+        connect_attempts := Attempts,
+        drain_timeout := DrainTimeout
     } = Listener,
     %% proxies are linked to this process and their exits free the slots
     process_flag(trap_exit, true),
@@ -113,6 +115,7 @@ init({Listener, #{connect_timeout := ConnectTimeout}}) ->
                 name = Name,
                 socket = Socket,
                 max = Max,
+                drain_timeout = DrainTimeout,
                 counters = Counters,
                 proxy = #{
                     listener => Name,
@@ -159,6 +162,48 @@ handle_info({'EXIT', Socket, Reason}, #state{socket = Socket} = State) ->
 handle_info(Message, State) ->
     ?LOG_WARNING(#{event => unexpected_message, message => Message}),
     {noreply, State}.
+
+%% an orderly stop drains: the closed socket lets no new client in, and open
+%% connections get drain_timeout to finish before they die with this process,
+%% to which they are linked. a crash skips the wait, so a replacement listener
+%% can take over quickly
+-spec terminate(term(), #state{}) -> ok.
+terminate(Reason, #state{socket = Socket} = State) ->
+    ok = gen_tcp:close(Socket),
+    case orderly(Reason) of
+        true -> drain(State);
+        false -> ok
+    end.
+
+orderly(normal) -> true;
+orderly(shutdown) -> true;
+orderly({shutdown, _Reason}) -> true;
+orderly(_Crash) -> false.
+
+drain(#state{proxies = Proxies}) when map_size(Proxies) =:= 0 ->
+    ok;
+drain(#state{name = Name, proxies = Proxies, drain_timeout = Timeout}) ->
+    ?LOG_NOTICE(#{
+        event => listener_draining,
+        listener => Name,
+        connections => map_size(Proxies),
+        timeout_ms => Timeout
+    }),
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
+    case map_size(await_proxies(Proxies, Deadline)) of
+        0 -> ok;
+        Left -> ?LOG_WARNING(#{event => connections_cut, listener => Name, connections => Left})
+    end.
+
+await_proxies(Proxies, _Deadline) when map_size(Proxies) =:= 0 ->
+    Proxies;
+await_proxies(Proxies, Deadline) ->
+    receive
+        {'EXIT', Proxy, _Reason} when is_map_key(Proxy, Proxies) ->
+            await_proxies(maps:remove(Proxy, Proxies), Deadline)
+    after max(0, Deadline - erlang:monotonic_time(millisecond)) ->
+        Proxies
+    end.
 
 %% a restarted listener keeps counting where its predecessor stopped, so the
 %% totals only reset with the node

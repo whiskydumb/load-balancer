@@ -33,12 +33,25 @@ unknown_path_is_not_found_test() ->
 wrong_method_is_not_allowed_test() ->
     ?assertMatch(#{status := 405}, handle('DELETE', <<"/health">>, #{}, undefined)).
 
+backend_routes_check_the_method_test_() ->
+    [
+        ?_assertMatch(#{status := 405}, handle('GET', <<"/pools/web/backends">>, #{}, undefined)),
+        ?_assertMatch(
+            #{status := 405}, handle('GET', <<"/pools/web/backends/10.0.0.1:80">>, #{}, undefined)
+        ),
+        ?_assertMatch(
+            #{status := 405},
+            handle('DELETE', <<"/pools/web/backends/10.0.0.1:80/drain">>, #{}, undefined)
+        )
+    ].
+
 responses_are_never_cached_test() ->
     #{headers := Headers} = handle('GET', <<"/health">>, #{}, undefined),
     ?assertEqual(<<"no-store">>, proplists:get_value(<<"cache-control">>, Headers)).
 
 handle(Method, Path, Headers, Token) ->
-    lb_admin_api:handle(#{method => Method, path => Path, headers => Headers}, Token).
+    Request = #{method => Method, path => Path, headers => Headers, body => <<>>},
+    lb_admin_api:handle(Request, Token).
 
 bearer(Token) ->
     #{<<"authorization">> => <<"Bearer ", Token/binary>>}.

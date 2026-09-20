@@ -16,6 +16,7 @@
     observe/3,
     active/2,
     health/2,
+    admin/2,
     eventually/1,
     eventually/2
 ]).
@@ -120,6 +121,9 @@ active(Pool, Backend) ->
 
 health(Pool, Backend) ->
     status_field(Pool, Backend, health).
+
+admin(Pool, Backend) ->
+    status_field(Pool, Backend, admin).
 
 %% monitors, casts and probes are asynchronous, so tests poll for the state
 %% they expect

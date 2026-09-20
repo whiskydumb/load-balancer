@@ -27,7 +27,8 @@ defaults_fill_every_option_test() ->
             backlog => 1024,
             max_connections => 10000,
             idle_timeout => 3600000,
-            connect_attempts => 3
+            connect_attempts => 3,
+            drain_timeout => 5000
         },
         Listener
     ),

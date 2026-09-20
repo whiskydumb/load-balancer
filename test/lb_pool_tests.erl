@@ -6,6 +6,7 @@
 -define(A, {{127, 0, 0, 1}, 9001}).
 -define(B, {{127, 0, 0, 1}, 9002}).
 -define(C, {{127, 0, 0, 1}, 9003}).
+-define(D, {{127, 0, 0, 1}, 9004}).
 
 round_robin_pool_test_() ->
     {foreach, fun() -> lb_pool_fixture:start(?POOL, round_robin, [?A, ?B, ?C]) end,
@@ -18,7 +19,13 @@ round_robin_pool_test_() ->
             fun crashed_connection_releases_its_slot/1,
             fun restarted_pool_keeps_counting_open_connections/1,
             fun connection_closed_while_pool_was_down_is_released/1,
-            fun connection_monitored_twice_is_released_once/1
+            fun connection_monitored_twice_is_released_once/1,
+            fun drained_backend_gets_no_new_connections/1,
+            fun draining_keeps_open_connections/1,
+            fun added_backend_joins_the_rotation/1,
+            fun removed_backend_leaves_the_rotation/1,
+            fun runtime_changes_survive_a_pool_restart/1,
+            fun changes_to_unknown_backends_are_rejected/1
         ]}.
 
 streak_pool_test_() ->
@@ -116,6 +123,54 @@ connection_monitored_twice_is_released_once(_) ->
         lb_pool_fixture:close(Other)
     end).
 
+drained_backend_gets_no_new_connections(_) ->
+    ?_test(begin
+        ok = lb_pool:drain(?POOL, ?B),
+        ?assertEqual(draining, lb_pool_fixture:admin(?POOL, ?B)),
+        ?assertNot(lists:member(?B, picks(6))),
+        ok = lb_pool:enable(?POOL, ?B),
+        ?assert(lists:member(?B, picks(3)))
+    end).
+
+draining_keeps_open_connections(_) ->
+    ?_test(begin
+        Conn = lb_pool_fixture:open(?POOL, ?B),
+        ok = lb_pool:drain(?POOL, ?B),
+        ?assertEqual(1, lb_pool_fixture:active(?POOL, ?B)),
+        lb_pool_fixture:close(Conn)
+    end).
+
+added_backend_joins_the_rotation(_) ->
+    ?_test(begin
+        ok = lb_pool:add_backend(?POOL, backend(?D)),
+        ?assert(lists:member(?D, picks(4))),
+        ?assertEqual({error, already_exists}, lb_pool:add_backend(?POOL, backend(?D)))
+    end).
+
+removed_backend_leaves_the_rotation(_) ->
+    ?_test(begin
+        ok = lb_pool:remove_backend(?POOL, ?A),
+        ?assertNot(lists:member(?A, picks(6))),
+        ?assertEqual([?B, ?C], lb_pool:members(?POOL)),
+        ?assertEqual({error, unknown_backend}, lb_pool:remove_backend(?POOL, ?A))
+    end).
+
+runtime_changes_survive_a_pool_restart(Fixture) ->
+    ?_test(begin
+        ok = lb_pool:add_backend(?POOL, backend(?D)),
+        ok = lb_pool:drain(?POOL, ?B),
+        ok = lb_pool_fixture:restart_pool(Fixture),
+        ?assertEqual([?A, ?B, ?C, ?D], lb_pool:members(?POOL)),
+        ?assertEqual(draining, lb_pool_fixture:admin(?POOL, ?B))
+    end).
+
+changes_to_unknown_backends_are_rejected(_) ->
+    [
+        ?_assertEqual({error, unknown_backend}, lb_pool:drain(?POOL, ?D)),
+        ?_assertEqual({error, unknown_backend}, lb_pool:enable(?POOL, ?D)),
+        ?_assertEqual({error, unknown_pool}, lb_pool:drain(ghost, ?A))
+    ].
+
 health_flips_only_after_full_streaks(_) ->
     ?_test(begin
         Steps = [{failure, timeout}, {failure, timeout}, success, success],
@@ -153,6 +208,10 @@ supervisor_restarts_a_crashed_pool(_) ->
 properties_test_() ->
     Options = [{numtests, 100}, {to_file, user}],
     {timeout, 300, ?_assertEqual([], proper:module(prop_lb_pool, Options))}.
+
+backend({Host, Port}) ->
+    {ok, Backend} = lb_config:validate_backend(#{host => Host, port => Port}),
+    Backend.
 
 settles_at(Expected) ->
     lb_pool_fixture:eventually(fun() -> lb_pool_fixture:active(?POOL, ?A) =:= Expected end).

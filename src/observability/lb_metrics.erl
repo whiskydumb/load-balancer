@@ -57,6 +57,11 @@ backend_families() ->
             [{Labels, up(Status)} || {Labels, Status} <- Backends]
         ),
         gauge(
+            lb_backend_draining,
+            <<"1 while an operator keeps new connections away from the backend.">>,
+            [{Labels, draining(Status)} || {Labels, Status} <- Backends]
+        ),
+        gauge(
             lb_backend_connections_active,
             <<"Connections currently open to the backend.">>,
             Pick(active)
@@ -94,6 +99,9 @@ available(Fetch) ->
 
 up(#{health := up}) -> 1;
 up(#{health := down}) -> 0.
+
+draining(#{admin := draining}) -> 1;
+draining(#{admin := enabled}) -> 0.
 
 counter(Name, Help, Samples) ->
     #{name => Name, type => counter, help => Help, samples => Samples}.

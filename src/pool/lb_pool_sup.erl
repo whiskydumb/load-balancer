@@ -13,7 +13,8 @@ init(#{health_check := #{enabled := Enabled}} = Pool) ->
     %% probers report into the pool, so they start after it and restart with it
     SupFlags = #{strategy => rest_for_one, intensity => 5, period => 10},
     Children =
-        [#{id => lb_pool, start => {lb_pool, start_link, [Pool]}}] ++
+        %% the pool gets this supervisor's pid to add and remove probers later
+        [#{id => lb_pool, start => {lb_pool, start_link, [Pool, self()]}}] ++
             [
                 #{
                     id => lb_health_sup,

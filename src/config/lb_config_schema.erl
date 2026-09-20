@@ -204,11 +204,14 @@ to_text(Value) when is_list(Value); is_binary(Value) ->
 to_text(_Value) ->
     error.
 
+%% keys arrive as atoms from config files and as binaries from json
 head_segment(Segment) when is_atom(Segment) -> atom_to_list(Segment);
+head_segment(Segment) when is_binary(Segment) -> Segment;
 head_segment(Segment) -> io_lib:format("~0p", [Segment]).
 
 tail_segment(Index) when is_integer(Index) -> io_lib:format("[~p]", [Index]);
 tail_segment(Key) when is_atom(Key) -> [$. | atom_to_list(Key)];
+tail_segment(Key) when is_binary(Key) -> [$., Key];
 tail_segment(Other) -> io_lib:format(".~0p", [Other]).
 
 text(Format, Args) ->

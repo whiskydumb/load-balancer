@@ -91,6 +91,8 @@ serve(Token) ->
                     log_access(Request, Response);
                 {error, closed} ->
                     ok;
+                {error, body_too_large} ->
+                    _ = lb_http:send_response(Socket, lb_admin_api:too_large());
                 {error, _Malformed} ->
                     _ = lb_http:send_response(Socket, lb_admin_api:bad_request())
             end,

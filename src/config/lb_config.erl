@@ -1,6 +1,6 @@
 -module(lb_config).
 
--export([load/0, validate/1, format_error/1]).
+-export([load/0, validate/1, validate_backend/1, format_error/1]).
 
 -export_type([config/0, listener/0, pool/0, backend/0, health_check/0, admin/0, host/0, error/0]).
 
@@ -40,7 +40,8 @@
     backlog := pos_integer(),
     max_connections := pos_integer(),
     idle_timeout := pos_integer(),
-    connect_attempts := pos_integer()
+    connect_attempts := pos_integer(),
+    drain_timeout := non_neg_integer()
 }.
 
 -type admin() :: #{
@@ -69,6 +70,11 @@ validate(Raw) ->
         {error, Errors} ->
             {error, Errors}
     end.
+
+%% the same checks the config file gets, for backends added over the admin api
+-spec validate_backend(term()) -> {ok, backend()} | {error, [error()]}.
+validate_backend(Raw) ->
+    lb_config_schema:validate(backend_schema(), Raw).
 
 -spec format_error(error()) -> binary().
 format_error({Path, {duplicate, Value}}) ->
@@ -101,7 +107,10 @@ listener_schema() ->
         max_connections => #{type => {integer, 1, infinity}, default => 10000},
         idle_timeout => #{type => {integer, 1000, infinity}, default => 3600000},
         %% how many backends one client connection may try before giving up
-        connect_attempts => #{type => {integer, 1, 10}, default => 3}
+        connect_attempts => #{type => {integer, 1, 10}, default => 3},
+        %% on shutdown open connections get this long to finish; keep it below
+        %% the grace period of whatever stops the node, docker gives ten seconds
+        drain_timeout => #{type => {integer, 0, 600000}, default => 5000}
     }.
 
 pool_schema() ->
